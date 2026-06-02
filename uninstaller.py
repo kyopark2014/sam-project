@@ -10,7 +10,7 @@ import logging
 from botocore.exceptions import ClientError
 
 # Configuration
-project_name = "dwfb" # at least 3 characters
+project_name = "sam" # at least 3 characters
 region = "us-west-2"
 
 sts_client = boto3.client("sts", region_name=region)

@@ -12,28 +12,39 @@ import argparse
 import base64
 import ipaddress
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from botocore.exceptions import ClientError
 import urllib.request
 import urllib.error
 
 # Configuration
-project_name = "dwfb" # at least 3 characters
+project_name = "sam" # at least 3 characters
 region = "us-west-2"
-git_name = "dwfb-project"
+git_name = "sam-project"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
 vector_index_name = project_name
+vector_bucket_name = f"{project_name}-{account_id}"
+embedding_dimensions = 1024
+embedding_data_type = "float32"
+distance_metric = "cosine"
 custom_header_name = "X-Custom-Header"
 custom_header_value = f"{project_name}_12dab15e4s31"
+
+# Bedrock Knowledge Base requires these metadata keys as non-filterable on S3 Vectors index
+BEDROCK_NON_FILTERABLE_METADATA_KEYS = [
+    "AMAZON_BEDROCK_TEXT",
+    "AMAZON_BEDROCK_METADATA",
+]
 
 # Initialize boto3 clients
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
 secrets_client = boto3.client("secretsmanager", region_name=region)
 opensearch_client = boto3.client("opensearchserverless", region_name=region)
+s3vectors_client = boto3.client("s3vectors", region_name=region)
 ec2_client = boto3.client("ec2", region_name=region)
 elbv2_client = boto3.client("elbv2", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
@@ -41,6 +52,19 @@ lambda_client = boto3.client("lambda", region_name=region)
 ssm_client = boto3.client("ssm", region_name=region)
 
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
+
+
+def s3_vectors_bucket_arn(bucket_name: str = vector_bucket_name) -> str:
+    """ARN for an S3 vector bucket."""
+    return f"arn:aws:s3vectors:{region}:{account_id}:bucket/{bucket_name}"
+
+
+def s3_vectors_index_arn(
+    index_name: str = vector_index_name,
+    bucket_name: str = vector_bucket_name,
+) -> str:
+    """ARN for a vector index within an S3 vector bucket."""
+    return f"{s3_vectors_bucket_arn(bucket_name)}/index/{index_name}"
 
 # Configure logging
 def setup_logging(log_level=logging.INFO):
@@ -276,17 +300,40 @@ def create_knowledge_base_role() -> str:
     }
     attach_inline_policy(role_name, f"knowledge-base-s3-policy-for-{project_name}", s3_policy)
     
-    opensearch_policy = {
+    # Remove legacy OpenSearch Serverless inline policy if upgrading from a previous install
+    try:
+        iam_client.delete_role_policy(
+            RoleName=role_name,
+            PolicyName=f"bedrock-agent-opensearch-policy-for-{project_name}",
+        )
+    except ClientError:
+        pass
+
+    bucket_arn = s3_vectors_bucket_arn()
+    s3vectors_policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
                 "Effect": "Allow",
-                "Action": ["aoss:APIAccessAll"],
-                "Resource": ["*"]
+                "Action": [
+                    "s3vectors:GetVectorBucket",
+                    "s3vectors:ListVectorBuckets",
+                    "s3vectors:GetIndex",
+                    "s3vectors:ListIndexes",
+                    "s3vectors:QueryVectors",
+                    "s3vectors:GetVectors",
+                    "s3vectors:PutVectors",
+                    "s3vectors:DeleteVectors",
+                    "s3vectors:ListVectors",
+                ],
+                "Resource": [
+                    bucket_arn,
+                    f"{bucket_arn}/index/*",
+                ],
             }
-        ]
+        ],
     }
-    attach_inline_policy(role_name, f"bedrock-agent-opensearch-policy-for-{project_name}", opensearch_policy)
+    attach_inline_policy(role_name, f"bedrock-agent-s3vectors-policy-for-{project_name}", s3vectors_policy)
     
     bedrock_policy = {
         "Version": "2012-10-17",
@@ -713,28 +760,12 @@ def create_secrets() -> Dict[str, str]:
     logger.info("Please enter API keys when prompted (press Enter to skip and leave empty):")
     
     secrets = {
-        "weather": {
-            "name": f"openweathermap-{project_name}",
-            "description": "secret for weather api key",
-            "secret_value": {
-                "project_name": project_name,
-                "weather_api_key": ""
-            }
-        },
         "tavily": {
             "name": f"tavilyapikey-{project_name}",
             "description": "secret for tavily api key",
             "secret_value": {
                 "project_name": project_name,
                 "tavily_api_key": ""
-            }
-        },
-        "notion": {
-            "name": f"notionapikey-{project_name}",
-            "description": "secret for notion api key",
-            "secret_value": {
-                "project_name": project_name,
-                "notion_api_key": ""
             }
         }
     }
@@ -750,18 +781,10 @@ def create_secrets() -> Dict[str, str]:
         except ClientError as e:
             if e.response["Error"]["Code"] == "ResourceNotFoundException":
                 # Secret doesn't exist, prompt for API key and create it
-                if key == "weather":
-                    logger.info(f"Enter credential of {secret_config['name']} (Weather API Key - OpenWeatherMap):")
-                    api_key = input(f"Creating {secret_config['name']} - Weather API Key (OpenWeatherMap): ").strip()
-                    secret_config["secret_value"]["weather_api_key"] = api_key
-                elif key == "tavily":
+                if key == "tavily":
                     logger.info(f"Enter credential of {secret_config['name']} (Tavily API Key):")
                     api_key = input(f"Creating {secret_config['name']} - Tavily API Key: ").strip()
                     secret_config["secret_value"]["tavily_api_key"] = api_key
-                elif key == "notion":
-                    logger.info(f"Enter credential of {secret_config['name']} (Notion API Key):")
-                    api_key = input(f"Creating {secret_config['name']} - Notion API Key: ").strip()
-                    secret_config["secret_value"]["notion_api_key"] = api_key
                 
                 # Create the secret
                 try:
@@ -2678,168 +2701,170 @@ def delete_knowledge_base(knowledge_base_id: str) -> None:
             raise
 
 
-def create_vector_index_in_opensearch(collection_endpoint: str, index_name: str) -> bool:
-    """Create vector index in OpenSearch Serverless collection."""
+def create_s3_vectors_store() -> Dict[str, str]:
+    """Create S3 vector bucket and index for Bedrock Knowledge Base."""
+    logger.info("[4/10] Creating S3 Vectors store (vector bucket + index)")
+
+    vector_bucket_arn = s3_vectors_bucket_arn()
+    index_arn = s3_vectors_index_arn()
+
     try:
-        # Validate collection_endpoint
-        if not collection_endpoint or not collection_endpoint.strip():
-            logger.error(f"  Invalid collection endpoint: '{collection_endpoint}'. Collection endpoint is required.")
-            return False
-        
-        # Ensure endpoint has proper scheme
-        if not collection_endpoint.startswith(('http://', 'https://')):
-            logger.error(f"  Invalid collection endpoint format: '{collection_endpoint}'. Must start with http:// or https://")
-            return False
-        
-        # Try to import required packages, install if missing
-        try:
-            import requests
-            from requests_aws4auth import AWS4Auth
-        except ImportError:
-            logger.info("  Installing required packages for OpenSearch index creation...")
-            import subprocess
-            import sys
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "requests-aws4auth"])
-            import requests
-            from requests_aws4auth import AWS4Auth
-        
-        # Get AWS credentials
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        awsauth = AWS4Auth(credentials.access_key, credentials.secret_key, region, 'aoss', session_token=credentials.token)
-        
-        # Check if index already exists
-        url = f"{collection_endpoint}/{index_name}"
-        response = requests.get(url, auth=awsauth, timeout=30)
-        if response.status_code == 200:
-            logger.debug(f"Vector index '{index_name}' already exists")
-            return True
-        
-        # Index mapping for vector search
-        index_mapping = {
-            "settings": {
-                "index": {
-                    "knn": True,
-                    "knn.algo_param.ef_search": 512
-                }
-            },
-            "mappings": {
-                "properties": {
-                    "vector_field": {
-                        "type": "knn_vector",
-                        "dimension": 1024,
-                        "method": {
-                            "name": "hnsw",
-                            "space_type": "cosinesimil",
-                            "engine": "faiss",
-                            "parameters": {
-                                "ef_construction": 512,
-                                "m": 16
-                            }
-                        }
-                    },
-                    "AMAZON_BEDROCK_TEXT": {
-                        "type": "text"
-                    },
-                    "AMAZON_BEDROCK_METADATA": {
-                        "type": "text"
-                    }
-                }
-            }
-        }
-        
-        # Create index
-        headers = {"Content-Type": "application/json"}
-        response = requests.put(
-            url,
-            auth=awsauth,
-            headers=headers,
-            data=json.dumps(index_mapping),
-            timeout=30
-        )
-        
-        if response.status_code in [200, 201]:
-            logger.info(f"  ✓ Vector index '{index_name}' created successfully")
-            logger.info("  Waiting for index to be ready...")
-            time.sleep(30)  # Wait for index to be ready
-            return True
+        s3vectors_client.create_vector_bucket(vectorBucketName=vector_bucket_name)
+        logger.info(f"  ✓ Vector bucket created: {vector_bucket_name}")
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("ConflictException", "ResourceAlreadyExistsException"):
+            logger.warning(f"  Vector bucket already exists: {vector_bucket_name}")
+            try:
+                existing = s3vectors_client.get_vector_bucket(
+                    vectorBucketName=vector_bucket_name
+                )
+                vector_bucket_arn = existing["vectorBucket"]["vectorBucketArn"]
+            except ClientError:
+                pass
         else:
-            logger.error(f"  Failed to create vector index: {response.status_code} - {response.text}")
-            return False
-            
-    except ImportError:
-        logger.error("  requests-aws4auth package is required. Install with: pip install requests-aws4auth")
-        return False
-    except Exception as e:
-        logger.error(f"  Error creating vector index: {e}")
-        return False
+            logger.error(f"Failed to create vector bucket: {e}")
+            raise
+
+    try:
+        response = s3vectors_client.create_index(
+            vectorBucketName=vector_bucket_name,
+            indexName=vector_index_name,
+            dataType=embedding_data_type,
+            dimension=embedding_dimensions,
+            distanceMetric=distance_metric,
+            metadataConfiguration={
+                "nonFilterableMetadataKeys": BEDROCK_NON_FILTERABLE_METADATA_KEYS,
+            },
+        )
+        index_arn = response.get("indexArn", index_arn)
+        logger.info(f"  ✓ Vector index created: {vector_index_name}")
+        logger.info("  Waiting for vector index to be ready...")
+        time.sleep(15)
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("ConflictException", "ResourceAlreadyExistsException"):
+            logger.warning(f"  Vector index already exists: {vector_index_name}")
+            try:
+                existing = s3vectors_client.get_index(
+                    vectorBucketName=vector_bucket_name,
+                    indexName=vector_index_name,
+                )
+                index_arn = existing["index"]["indexArn"]
+            except ClientError:
+                pass
+        else:
+            logger.error(f"Failed to create vector index: {e}")
+            raise
+
+    logger.info("✓ S3 Vectors store ready")
+    logger.info(f"  Vector bucket ARN: {vector_bucket_arn}")
+    logger.info(f"  Vector index ARN: {index_arn}")
+
+    return {
+        "vectorBucketName": vector_bucket_name,
+        "vectorBucketArn": vector_bucket_arn,
+        "indexName": vector_index_name,
+        "indexArn": index_arn,
+    }
 
 
-def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowledge_base_role_arn: str, s3_bucket_name: str) -> str:
-    """Create Knowledge Base with correct OpenSearch collection."""
-    logger.info("[4.5/10] Creating Knowledge Base with OpenSearch collection")
-    
-    # Create vector index first
-    logger.info("  Creating vector index in OpenSearch collection...")
-    if not create_vector_index_in_opensearch(opensearch_info["endpoint"], vector_index_name):
-        raise Exception("Failed to create vector index in OpenSearch collection")
-    
+def ensure_data_source(
+    bedrock_agent_client,
+    knowledge_base_id: str,
+    s3_bucket_name: str,
+) -> str:
+    """Create S3 data source with default parser when missing."""
+    data_sources = bedrock_agent_client.list_data_sources(
+        knowledgeBaseId=knowledge_base_id,
+        maxResults=100,
+    )
+    for ds in data_sources.get("dataSourceSummaries", []):
+        if ds["name"] == s3_bucket_name:
+            logger.info(f"  Data source already exists: {ds['dataSourceId']}")
+            return ds["dataSourceId"]
+
+    logger.info("  Creating data source with default parser...")
+    data_source_response = bedrock_agent_client.create_data_source(
+        knowledgeBaseId=knowledge_base_id,
+        name=s3_bucket_name,
+        description=f"S3 data source: {s3_bucket_name}",
+        dataDeletionPolicy="RETAIN",
+        dataSourceConfiguration={
+            "type": "S3",
+            "s3Configuration": {
+                "bucketArn": f"arn:aws:s3:::{s3_bucket_name}",
+                "inclusionPrefixes": ["docs/"],
+            },
+        },
+        vectorIngestionConfiguration={
+            "chunkingConfiguration": {
+                "chunkingStrategy": "FIXED_SIZE",
+                "fixedSizeChunkingConfiguration": {
+                    "maxTokens": 300,
+                    "overlapPercentage": 20,
+                },
+            },
+        },
+    )
+    data_source_id = data_source_response["dataSource"]["dataSourceId"]
+    logger.info(f"  ✓ Data source created: {data_source_id}")
+    return data_source_id
+
+
+def create_knowledge_base_with_s3_vectors(
+    s3_vectors_info: Dict[str, str], knowledge_base_role_arn: str, s3_bucket_name: str
+) -> Tuple[str, str]:
+    """Create Knowledge Base with S3 Vectors as the vector store."""
+    logger.info("[4.5/10] Creating Knowledge Base with S3 Vectors")
+
     bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
-    # parsing_model_arn = f"arn:aws:bedrock:{region}:{account_id}:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
-    parsing_model_arn = f"arn:aws:bedrock:{region}:{account_id}:inference-profile/global.anthropic.claude-sonnet-4-20250514-v1:0"
 
-    # Check if Knowledge Base already exists
     try:
         logger.info("  Checking if Knowledge Base already exists...")
         kb_list = bedrock_agent_client.list_knowledge_bases()
         for kb in kb_list.get("knowledgeBaseSummaries", []):
             if kb["name"] == project_name:
                 logger.warning(f"Knowledge Base already exists: {kb['knowledgeBaseId']}")
-                
-                # Verify it's using the correct OpenSearch collection
-                kb_details = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=kb["knowledgeBaseId"])
-                kb_collection_arn = kb_details["knowledgeBase"]["storageConfiguration"]["opensearchServerlessConfiguration"]["collectionArn"]
-                
-                if kb_collection_arn != opensearch_info["arn"]:
-                    logger.warning(f"Knowledge Base is using wrong OpenSearch collection:")
-                    logger.warning(f"  Current: {kb_collection_arn}")
-                    logger.warning(f"  Expected: {opensearch_info['arn']}")
+
+                kb_details = bedrock_agent_client.get_knowledge_base(
+                    knowledgeBaseId=kb["knowledgeBaseId"]
+                )
+                storage = kb_details["knowledgeBase"]["storageConfiguration"]
+                s3_cfg = storage.get("s3VectorsConfiguration", {})
+                kb_index_arn = s3_cfg.get("indexArn")
+                storage_type = storage.get("type")
+
+                if storage_type != "S3_VECTORS" or kb_index_arn != s3_vectors_info["indexArn"]:
+                    logger.warning("Knowledge Base is not using the expected S3 Vectors index:")
+                    logger.warning(f"  Storage type: {storage_type}")
+                    logger.warning(f"  Current index ARN: {kb_index_arn}")
+                    logger.warning(f"  Expected index ARN: {s3_vectors_info['indexArn']}")
 
                     delete_knowledge_base(kb["knowledgeBaseId"])
-                    break                    
-                else:
-                    logger.info(f"Knowledge Base is using correct OpenSearch collection")
-                    # Look up existing data source ID
-                    existing_data_source_id = None
-                    try:
-                        ds_response = bedrock_agent_client.list_data_sources(
-                            knowledgeBaseId=kb["knowledgeBaseId"],
-                            maxResults=10
-                        )
-                        for ds in ds_response.get("dataSourceSummaries", []):
-                            existing_data_source_id = ds["dataSourceId"]
-                            logger.info(f"  Found existing data source: {existing_data_source_id}")
-                            break
-                    except Exception as ds_err:
-                        logger.warning(f"  Could not list data sources: {ds_err}")
-                    return kb["knowledgeBaseId"], existing_data_source_id
+                    break
+
+                logger.info("Knowledge Base is using correct S3 Vectors index")
+                data_source_id = ensure_data_source(
+                    bedrock_agent_client, kb["knowledgeBaseId"], s3_bucket_name
+                )
+                return kb["knowledgeBaseId"], data_source_id
         logger.info("  Knowledge Base does not exist. Creating new one...")
     except Exception as e:
         logger.debug(f"Error checking existing Knowledge Base: {e}")
-    
-    # Verify Knowledge Base role before creating
+
     logger.info("  Verifying Knowledge Base role configuration...")
     try:
-        role_response = iam_client.get_role(RoleName=f"role-knowledge-base-for-{project_name}-{region}")
+        role_response = iam_client.get_role(
+            RoleName=f"role-knowledge-base-for-{project_name}-{region}"
+        )
         policy_doc = role_response["Role"]["AssumeRolePolicyDocument"]
-        # Handle both string and dict formats (boto3 may return either)
         if isinstance(policy_doc, str):
             trust_policy = json.loads(policy_doc)
         else:
             trust_policy = policy_doc
         logger.debug(f"  Role trust policy: {json.dumps(trust_policy, indent=2)}")
-        
-        # Verify trust policy allows bedrock.amazonaws.com
+
         statements = trust_policy.get("Statement", [])
         bedrock_allowed = False
         for statement in statements:
@@ -2848,106 +2873,62 @@ def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowl
                 if principal.get("Service") == "bedrock.amazonaws.com":
                     bedrock_allowed = True
                     break
-        
+
         if not bedrock_allowed:
             logger.error("  ✗ Knowledge Base role trust policy does not allow bedrock.amazonaws.com")
             logger.error("  Please update the role trust policy manually or delete and recreate the role")
             raise Exception("Knowledge Base role trust policy is incorrect")
-        
+
         logger.info("  ✓ Knowledge Base role trust policy is correct")
     except ClientError as role_error:
         logger.error(f"  ✗ Failed to verify Knowledge Base role: {role_error}")
         raise
-    
-    # Create Knowledge Base
-    logger.debug(f"Creating Knowledge Base with OpenSearch collection: {opensearch_info['arn']}")
+
+    logger.debug(f"Creating Knowledge Base with S3 Vectors index: {s3_vectors_info['indexArn']}")
     response = bedrock_agent_client.create_knowledge_base(
         name=project_name,
-        description="Knowledge base based on OpenSearch",
+        description="Knowledge base with default parser (S3 Vectors)",
         roleArn=knowledge_base_role_arn,
-        tags={
-            project_name: 'true'
-        },
+        tags={project_name: "true"},
         knowledgeBaseConfiguration={
             "type": "VECTOR",
             "vectorKnowledgeBaseConfiguration": {
                 "embeddingModelArn": f"arn:aws:bedrock:{region}::foundation-model/amazon.titan-embed-text-v2:0",
                 "embeddingModelConfiguration": {
                     "bedrockEmbeddingModelConfiguration": {
-                        "dimensions": 1024
+                        "dimensions": embedding_dimensions,
+                        "embeddingDataType": "FLOAT32",
                     }
-                }
-            }
+                },
+            },
         },
         storageConfiguration={
-            "type": "OPENSEARCH_SERVERLESS",
-            "opensearchServerlessConfiguration": {
-                "collectionArn": opensearch_info["arn"],
-                "fieldMapping": {
-                    "metadataField": "AMAZON_BEDROCK_METADATA",
-                    "textField": "AMAZON_BEDROCK_TEXT",
-                    "vectorField": "vector_field"
-                },
-                "vectorIndexName": vector_index_name
-            }
-        }
+            "type": "S3_VECTORS",
+            "s3VectorsConfiguration": {
+                "vectorBucketArn": s3_vectors_info["vectorBucketArn"],
+                "indexArn": s3_vectors_info["indexArn"],
+            },
+        },
     )
-    
+
     knowledge_base_id = response["knowledgeBase"]["knowledgeBaseId"]
     logger.info(f"✓ Knowledge Base created: {knowledge_base_id}")
-    
-    # Wait for Knowledge Base to be active
+
     logger.info("  Waiting for Knowledge Base to be active...")
     while True:
         kb_response = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=knowledge_base_id)
         status = kb_response["knowledgeBase"]["status"]
-        
+
         if status == "ACTIVE":
             logger.info("  Knowledge Base is now active")
             break
-        elif status == "FAILED":
+        if status == "FAILED":
             raise Exception("Knowledge Base creation failed")
-        
+
         logger.debug(f"  Knowledge Base status: {status} (waiting...)")
         time.sleep(10)
-    
-    # Create data source
-    logger.info("  Creating data source...")
-    data_source_response = bedrock_agent_client.create_data_source(
-        knowledgeBaseId=knowledge_base_id,
-        name=s3_bucket_name,
-        description=f"S3 data source: {s3_bucket_name}",
-        dataDeletionPolicy='RETAIN',
-        dataSourceConfiguration={
-            "type": "S3",
-            "s3Configuration": {
-                "bucketArn": f"arn:aws:s3:::{s3_bucket_name}",
-                "inclusionPrefixes": ["docs/"]
-            }
-        },
-        vectorIngestionConfiguration={
-            "chunkingConfiguration": {
-                "chunkingStrategy": "HIERARCHICAL",
-                "hierarchicalChunkingConfiguration": {
-                    "levelConfigurations": [
-                        {"maxTokens": 1500},
-                        {"maxTokens": 300}
-                    ],
-                    "overlapTokens": 60
-                }
-            },
-            "parsingConfiguration": {
-                "parsingStrategy": "BEDROCK_FOUNDATION_MODEL",
-                "bedrockFoundationModelConfiguration": {
-                    "modelArn": parsing_model_arn
-                }
-            }
-        }
-    )
-    
-    data_source_id = data_source_response["dataSource"]["dataSourceId"]
-    logger.info(f"  ✓ Data source created: {data_source_id}")
-    
+
+    data_source_id = ensure_data_source(bedrock_agent_client, knowledge_base_id, s3_bucket_name)
     return knowledge_base_id, data_source_id
 
 
@@ -3005,6 +2986,37 @@ def create_agentcore_memory_role() -> str:
 def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str) -> Dict[str, str]:
     """Create CloudFront distribution with hybrid ALB + S3 origins."""
     logger.info("[7/10] Creating CloudFront distribution (ALB + S3 hybrid)")
+
+    def ensure_artifacts_cache_behavior(dist_id: str, dist_config: Dict, etag: str) -> bool:
+        """Ensure /artifacts/* is routed to S3 origin for file downloads."""
+        cache_behaviors = dist_config.setdefault("CacheBehaviors", {"Quantity": 0, "Items": []})
+        items = cache_behaviors.setdefault("Items", [])
+        if any(b.get("PathPattern") == "/artifacts/*" for b in items):
+            return False
+
+        items.append({
+            "PathPattern": "/artifacts/*",
+            "TargetOriginId": f"s3-{project_name}",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": {
+                "Quantity": 2,
+                "Items": ["GET", "HEAD"],
+                "CachedMethods": {
+                    "Quantity": 2,
+                    "Items": ["GET", "HEAD"]
+                }
+            },
+            "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+            "Compress": True
+        })
+        cache_behaviors["Quantity"] = len(items)
+
+        cloudfront_client.update_distribution(
+            Id=dist_id,
+            DistributionConfig=dist_config,
+            IfMatch=etag
+        )
+        return True
     
     # Check if CloudFront distribution already exists
     try:
@@ -3013,6 +3025,12 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
             if f"CloudFront-for-{project_name}" in dist.get("Comment", ""):
                 if dist.get("Enabled", False):
                     logger.warning(f"CloudFront distribution already exists: {dist['DomainName']}")
+                    dist_config_response = cloudfront_client.get_distribution_config(Id=dist["Id"])
+                    dist_config = dist_config_response["DistributionConfig"]
+                    etag = dist_config_response["ETag"]
+                    if ensure_artifacts_cache_behavior(dist["Id"], dist_config, etag):
+                        logger.info("  ✓ Added /artifacts/* cache behavior to existing CloudFront distribution")
+                        logger.warning("  Note: CloudFront distribution may take 15-20 minutes to deploy")
                     return {
                         "id": dist["Id"],
                         "domain": dist["DomainName"]
@@ -3029,13 +3047,17 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
                     
                     # Enable the distribution
                     dist_config["Enabled"] = True
-                    
-                    # Update the distribution
                     cloudfront_client.update_distribution(
                         Id=dist["Id"],
                         DistributionConfig=dist_config,
                         IfMatch=etag
                     )
+                    # Re-read latest config/ETag after enabling, then ensure /artifacts/* behavior.
+                    dist_config_response = cloudfront_client.get_distribution_config(Id=dist["Id"])
+                    dist_config = dist_config_response["DistributionConfig"]
+                    etag = dist_config_response["ETag"]
+                    if ensure_artifacts_cache_behavior(dist["Id"], dist_config, etag):
+                        logger.info("  ✓ Added /artifacts/* cache behavior")
                     
                     logger.info(f"  ✓ Enabled CloudFront distribution: {dist['DomainName']}")
                     logger.warning("  Note: CloudFront distribution may take 15-20 minutes to deploy")
@@ -3134,7 +3156,7 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
             "Compress": True
         },
         "CacheBehaviors": {
-            "Quantity": 2,
+            "Quantity": 3,
             "Items": [
                 {
                     "PathPattern": "/images/*",
@@ -3153,6 +3175,21 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
                 },
                 {
                     "PathPattern": "/docs/*",
+                    "TargetOriginId": f"s3-{project_name}",
+                    "ViewerProtocolPolicy": "redirect-to-https",
+                    "AllowedMethods": {
+                        "Quantity": 2,
+                        "Items": ["GET", "HEAD"],
+                        "CachedMethods": {
+                            "Quantity": 2,
+                            "Items": ["GET", "HEAD"]
+                        }
+                    },
+                    "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+                    "Compress": True
+                },
+                {
+                    "PathPattern": "/artifacts/*",
                     "TargetOriginId": f"s3-{project_name}",
                     "ViewerProtocolPolicy": "redirect-to-https",
                     "AllowedMethods": {
@@ -3217,7 +3254,7 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
         logger.info(f"✓ CloudFront distribution created (ALB + S3): {distribution_domain}")
         logger.info(f"  Distribution ID: {distribution_id}")
         logger.info(f"  Default origin: ALB {alb_info['dns']}")
-        logger.info(f"  /images/* and /docs/* origins: S3 bucket {s3_bucket_name}")
+        logger.info(f"  /images/*, /docs/* and /artifacts/* origins: S3 bucket {s3_bucket_name}")
         logger.warning("  Note: CloudFront distribution may take 15-20 minutes to deploy")
         
     except ClientError as e:
@@ -3369,8 +3406,8 @@ def run_setup_script_via_ssm(instance_id: str, environment: Dict[str, str], git_
         raise
 
 
-def create_ec2_instance(vpc_info: Dict[str, str], ec2_role_arn: str, 
-                       knowledge_base_role_arn: str, opensearch_info: Dict[str, str],
+def create_ec2_instance(vpc_info: Dict[str, str], ec2_role_arn: str,
+                       knowledge_base_role_arn: str, s3_vectors_info: Dict[str, str],
                        s3_bucket_name: str, cloudfront_domain: str,
                        agentcore_memory_role_arn: str, knowledge_base_id: str,
                        data_source_id: str = None) -> str:
@@ -3432,8 +3469,12 @@ def create_ec2_instance(vpc_info: Dict[str, str], ec2_role_arn: str,
         "knowledge_base_id": knowledge_base_id,
         "data_source_id": data_source_id if data_source_id else "",
         "knowledge_base_role": knowledge_base_role_arn,
-        "collectionArn": opensearch_info["arn"],
-        "opensearch_url": opensearch_info["endpoint"],
+        "collectionArn": "",
+        "opensearch_url": "",
+        "vector_bucket_name": s3_vectors_info["vectorBucketName"],
+        "vector_bucket_arn": s3_vectors_info["vectorBucketArn"],
+        "vector_index_name": s3_vectors_info["indexName"],
+        "vector_index_arn": s3_vectors_info["indexArn"],
         "s3_bucket": s3_bucket_name,
         "s3_arn": f"arn:aws:s3:::{s3_bucket_name}",
         "sharing_url": f"https://{cloudfront_domain}",
@@ -3774,6 +3815,10 @@ def run_setup_on_existing_instance(instance_id: Optional[str] = None):
                 "knowledge_base_role": config_data.get("knowledge_base_role", ""),
                 "collectionArn": config_data.get("collectionArn", ""),
                 "opensearch_url": config_data.get("opensearch_url", ""),
+                "vector_bucket_name": config_data.get("vector_bucket_name", ""),
+                "vector_bucket_arn": config_data.get("vector_bucket_arn", ""),
+                "vector_index_name": config_data.get("vector_index_name", ""),
+                "vector_index_arn": config_data.get("vector_index_arn", ""),
                 "s3_bucket": config_data.get("s3_bucket", ""),
                 "s3_arn": config_data.get("s3_arn", ""),
                 "sharing_url": config_data.get("sharing_url", ""),
@@ -3792,6 +3837,10 @@ def run_setup_on_existing_instance(instance_id: Optional[str] = None):
             "knowledge_base_role": "",
             "collectionArn": "",
             "opensearch_url": "",
+            "vector_bucket_name": "",
+            "vector_bucket_arn": "",
+            "vector_index_name": "",
+            "vector_index_arn": "",
             "s3_bucket": "",
             "s3_arn": "",
             "sharing_url": "",
@@ -3994,7 +4043,7 @@ def main():
     s3_bucket_name = None
     knowledge_base_role_arn = None
     agentcore_memory_role_arn = None
-    opensearch_info = None
+    s3_vectors_info = None
     knowledge_base_id = None
     data_source_id = None
     vpc_info = None
@@ -4019,12 +4068,14 @@ def main():
         secret_arns = create_secrets()
         logger.info(f"Secrets created...")
         
-        # 4. Create OpenSearch collection (with EC2 and Knowledge Base roles for data access)
-        opensearch_info = create_opensearch_collection(ec2_role_arn, knowledge_base_role_arn)
-        logger.info(f"OpenSearch collection created...")
+        # 4. Create S3 Vectors store
+        s3_vectors_info = create_s3_vectors_store()
+        logger.info("S3 Vectors store created...")
         
-        # 4.5. Create Knowledge Base with correct OpenSearch collection        
-        knowledge_base_id, data_source_id = create_knowledge_base_with_opensearch(opensearch_info, knowledge_base_role_arn, s3_bucket_name)
+        # 4.5. Create Knowledge Base with S3 Vectors
+        knowledge_base_id, data_source_id = create_knowledge_base_with_s3_vectors(
+            s3_vectors_info, knowledge_base_role_arn, s3_bucket_name
+        )
         logger.info(f"Knowledge base created...")
         
         # 5. Create VPC
@@ -4042,7 +4093,7 @@ def main():
         # 8. Create EC2 instance
         instance_id = create_ec2_instance(
             vpc_info, ec2_role_arn, knowledge_base_role_arn,
-            opensearch_info, s3_bucket_name, cloudfront_info["domain"],
+            s3_vectors_info, s3_bucket_name, cloudfront_info["domain"],
             agentcore_memory_role_arn, knowledge_base_id, data_source_id
         )
         logger.info(f"EC2 instance created...")
@@ -4071,7 +4122,8 @@ def main():
         logger.info(f"  ALB DNS: http://{alb_info['dns']}/")
         logger.info(f"  CloudFront Domain: https://{cloudfront_info['domain']}")
         logger.info(f"  EC2 Instance ID: {instance_id} (deployed in private subnet)")
-        logger.info(f"  OpenSearch Endpoint: {opensearch_info['endpoint']}")
+        logger.info(f"  S3 Vector Bucket: {s3_vectors_info['vectorBucketName']}")
+        logger.info(f"  S3 Vector Index ARN: {s3_vectors_info['indexArn']}")
         logger.info(f"  Knowledge Base ID: {knowledge_base_id}")
         logger.info(f"  Knowledge Base Role: {knowledge_base_role_arn}")
         logger.info(f"  AgentCore Memory Role: {agentcore_memory_role_arn}")
@@ -4133,9 +4185,13 @@ def main():
             config_data["data_source_id"] = data_source_id
         if knowledge_base_role_arn:
             config_data["knowledge_base_role"] = knowledge_base_role_arn
-        if opensearch_info:
-            config_data["collectionArn"] = opensearch_info.get("arn", "")
-            config_data["opensearch_url"] = opensearch_info.get("endpoint", "")
+        config_data["collectionArn"] = ""
+        config_data["opensearch_url"] = ""
+        if s3_vectors_info:
+            config_data["vector_bucket_name"] = s3_vectors_info.get("vectorBucketName", "")
+            config_data["vector_bucket_arn"] = s3_vectors_info.get("vectorBucketArn", "")
+            config_data["vector_index_name"] = s3_vectors_info.get("indexName", "")
+            config_data["vector_index_arn"] = s3_vectors_info.get("indexArn", "")
         if s3_bucket_name:
             config_data["s3_bucket"] = s3_bucket_name
             config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
@@ -4144,10 +4200,9 @@ def main():
         if agentcore_memory_role_arn:
             config_data["agentcore_memory_role"] = agentcore_memory_role_arn
         
-        # Log the OpenSearch collection info if available
-        if opensearch_info:
-            logger.info(f"OpenSearch Collection ARN: {opensearch_info.get('arn', 'N/A')}")
-            logger.info(f"OpenSearch Collection Endpoint: {opensearch_info.get('endpoint', 'N/A')}")
+        if s3_vectors_info:
+            logger.info(f"S3 Vector Bucket ARN: {s3_vectors_info.get('vectorBucketArn', 'N/A')}")
+            logger.info(f"S3 Vector Index ARN: {s3_vectors_info.get('indexArn', 'N/A')}")
         
         try:
             os.makedirs(os.path.dirname(config_path), exist_ok=True)

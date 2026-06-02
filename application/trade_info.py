@@ -80,6 +80,7 @@ SUBJECT_TO_TICKER: Dict[str, str] = {
     "S-Oil": "010950.KS",  # S-Oil Corp
     "한국전력": "015760.KS",  # 한국전력 Corp
     "삼성전자": "005930.KS",  # 삼성전자 Corp
+    "삼성중공업": "010140.KS",  # 삼성중공업 Corp
     "삼성SDI": "006400.KS",  # 삼성SDI Corp,
     "효성중공업": "298040.KS",  # 효성중공업 Corp
     "한화오션": "042660.KS",  # 한화오션 Corp
@@ -100,10 +101,16 @@ def get_contents_type(file_name):
         content_type = "text/plain"
     elif file_name.lower().endswith((".csv")):
         content_type = "text/csv"
-    elif file_name.lower().endswith((".ppt", ".pptx")):
+    elif file_name.lower().endswith(".pptx"):
+        content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    elif file_name.lower().endswith(".ppt"):
         content_type = "application/vnd.ms-powerpoint"
-    elif file_name.lower().endswith((".doc", ".docx")):
+    elif file_name.lower().endswith(".docx"):
+        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif file_name.lower().endswith(".doc"):
         content_type = "application/msword"
+    elif file_name.lower().endswith(".xlsx"):
+        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     elif file_name.lower().endswith((".xls")):
         content_type = "application/vnd.ms-excel"
     elif file_name.lower().endswith((".py")):
@@ -167,12 +174,16 @@ def resolve_ticker(subject: str) -> str:
     2) Already a yfinance-style ticker (e.g., 035420.KS / 000660.KQ)
     3) Fallback: search via search_ticker_candidates and use the first match
     """
+    normalized_subject = (subject or "").strip().strip("'\"")
+    if not normalized_subject:
+        raise ValueError("Empty subject. Provide a known company name or a valid ticker.")
+
     # 1) Company name -> ticker mapping (exact match)
-    if subject in SUBJECT_TO_TICKER:
-        return SUBJECT_TO_TICKER[subject]
+    if normalized_subject in SUBJECT_TO_TICKER:
+        return SUBJECT_TO_TICKER[normalized_subject]
     
     # 1-2) Try matching without spaces (e.g., "LG 에너지솔루션" -> "LG에너지솔루션")
-    subject_no_space = subject.replace(" ", "")
+    subject_no_space = normalized_subject.replace(" ", "")
     if subject_no_space in SUBJECT_TO_TICKER:
         return SUBJECT_TO_TICKER[subject_no_space]
     
@@ -181,16 +192,25 @@ def resolve_ticker(subject: str) -> str:
         if key.replace(" ", "") == subject_no_space:
             return ticker
 
+    # 1-4) Fuzzy fallback for minor prompt artifacts (e.g., trailing particles/punctuation)
+    for key, ticker in SUBJECT_TO_TICKER.items():
+        key_no_space = key.replace(" ", "")
+        if subject_no_space in key_no_space or key_no_space in subject_no_space:
+            return ticker
+
     # 2) If it's already a yfinance-style ticker, accept as-is
-    s = (subject or "").strip().upper()
+    s = normalized_subject.upper()
     if len(s) >= 9 and s[:6].isdigit() and s[6] == '.' and s[7:] in {"KS", "KQ"}:
         return s
 
     # 3) Fallback: try searching candidates
     try:
-        candidates = search_ticker_candidates(subject, limit=1)
+        candidates = search_ticker_candidates(normalized_subject, limit=1)
     except Exception as exc:
-        raise ValueError(f"Failed to resolve ticker for input {subject!r}: {exc}") from exc
+        raise ValueError(
+            f"Failed to resolve ticker for input {normalized_subject!r}: {exc}. "
+            "If this is a known company, add it to SUBJECT_TO_TICKER to avoid external listing lookup."
+        ) from exc
 
     if candidates:
         return candidates[0].get("ticker", "") or (
@@ -198,7 +218,7 @@ def resolve_ticker(subject: str) -> str:
         )
 
     raise ValueError(
-        f"Unknown subject: {subject!r}. Provide a known company name or a valid ticker."
+        f"Unknown subject: {normalized_subject!r}. Provide a known company name or a valid ticker."
     )
 
 def _ticker_to_itemcode(ticker: str) -> str:
