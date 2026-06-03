@@ -69,7 +69,7 @@ with st.sidebar:
     # mcp selection    
     mcp_tools = [
         "tavily", 
-        "knowledge base", 
+        "RAG", 
         "aws documentation", 
         "trade_info", 
         "web_fetch",
