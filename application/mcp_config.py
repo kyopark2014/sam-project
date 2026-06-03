@@ -23,7 +23,7 @@ logger.info(f"workingDir: {workingDir}")
 
 mcp_user_config = {}    
 def load_config(mcp_type):
-    if mcp_type == "aws document":
+    if mcp_type == "aws documentation":
         mcp_type = 'aws_documentation'
 
     if mcp_type == "aws_documentation":
