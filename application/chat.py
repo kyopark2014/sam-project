@@ -815,8 +815,7 @@ def general_conversation(query):
                 reasoning_start = full_content.find('<reasoning>') + 11
                 reasoning_end = full_content.find('</reasoning>')
                 reasoning_content = full_content[reasoning_start:reasoning_end]
-                st.info(f"{reasoning_content}")
-            
+                
             logger.info(f"full_content: {full_content}")
                 
         except Exception:
