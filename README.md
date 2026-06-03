@@ -5,8 +5,7 @@
 여기에서 사용하는 architecture는 아래와 같습니다. Agent의 기본동작 확인 및 구현을 위해 EC2에 docker 형태로 탑재되어 ALB와 CloudFront를 이용해 사용자가 streamlit으로 동작을 테스트 할 수 있습니다. Agent가 생성하는 그림이나 문서는 S3를 이용해 공유될 수 있으며, EC2에 내장된 MCP server/client를 이용해 인터넷검색(Tavily), RAG(knowledge base) AWS tools(use-aws), AWS Document를 이용할 수 있습니다.
 
 
-<img width="947" height="370" alt="image" src="https://github.com/user-attachments/assets/bd607351-6e2f-4057-a374-5f9015735492" />
-
+<img width="1000" alt="image" src="https://github.com/user-attachments/assets/b53d0b56-a9a2-4af6-a273-b651835c2fec" />
 
 
 
