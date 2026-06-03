@@ -10,7 +10,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install streamlit==1.41.0 streamlit-chat pandas numpy boto3 
+RUN pip install streamlit==1.41.0 streamlit-chat streamlit-paste-button pandas numpy boto3 
 RUN pip install langchain_aws langchain langchain_community langchain_experimental langchain-text-splitters
 RUN pip install mcp 
 RUN pip install aioboto3 opensearch-py

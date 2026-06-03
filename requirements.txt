@@ -1,5 +1,6 @@
 streamlit==1.41.0 
 streamlit-chat 
+streamlit-paste-button
 pandas 
 numpy 
 boto3
