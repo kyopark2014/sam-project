@@ -328,7 +328,7 @@ if "event_loop_metrics" in event and \
 
 ## 배포하기
 
-### EC2로 배포하기
+### 배포하기
 
 AWS console의 CloudShell을 접속합니다. 이후 아래와 같이 python, pip, git, boto3를 설치합니다.
 
