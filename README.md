@@ -32,24 +32,16 @@ if prompt := st.chat_input("메시지를 입력하세요."):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    with st.chat_message("assistant"):
-        containers = {
-            "tools": st.empty(),
-            "status": st.empty(),
-            "notification": [st.empty() for _ in range(1000)],
-            "key": st.empty()
-        }
-        if mode == 'Agent':
-            response, image_urls = asyncio.run(chat.run_strands_agent(
-                query=prompt, 
-                strands_tools=selected_strands_tools, 
-                mcp_servers=selected_mcp_servers, 
-                containers=containers))
-        st.session_state.messages.append({
-            "role": "assistant", 
-            "content": response,
-            "images": image_urls if image_urls else []
-        })
+    with st.status("thinking...", expanded=True, state="running") as status:
+        notification_queue = NotificationQueue(container=status)
+        skill_list = selected_skills if selected_skills else []
+
+        response, image_urls = asyncio.run(strands_agent.run_strands_agent(
+            query=prompt, 
+            strands_tools=selected_strands_tools, 
+            mcp_servers=selected_mcp_servers, 
+            skill_list=skill_list,
+            notification_queue=notification_queue))
 ```
 
 ### Agent의 실행
