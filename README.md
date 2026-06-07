@@ -27,18 +27,12 @@ agent = Agent(
 ```mermaid
 flowchart TB
   subgraph UI["Streamlit (app.py)"]
-    M2[RAG]
-    M3[Agent]
+    M[Agent]
     SKUI[Skill / Strands Tool / MCP 선택]
-  end
-
-  subgraph Chat["chat.py"]
-    RAG[run_rag_with_knowledge_base]
   end
 
   subgraph LLM["Amazon Bedrock"]
     BR[Bedrock Runtime]
-    BKB[Bedrock Agent Runtime<br/>Knowledge Base]
   end
 
   subgraph Skills["Agent Skills (skill.py)"]
@@ -59,7 +53,7 @@ flowchart TB
 
   subgraph MCPServers["MCP Servers (mcp_config.py)"]
     T[tavily]
-    R[retrieve / RAG]
+    R[retrieve]
     AWS[aws documentation]
     WF[web_fetch / korea_weather / trade_info]
   end
@@ -69,12 +63,8 @@ flowchart TB
     S3[(S3)]
   end
 
-  M2 --> RAG
-  M3 --> RSA
+  M --> RSA
   SKUI -->|skill_list| BSP
-
-  RAG --> BKB
-  RAG --> BR
 
   RSA --> A
   A --> SA
