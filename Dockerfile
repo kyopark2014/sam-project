@@ -17,8 +17,8 @@ RUN pip install aioboto3 opensearch-py
 RUN pip install tavily-python==0.5.0 pytz==2024.2 beautifulsoup4==4.12.3
 RUN pip install plotly_express==0.4.1 matplotlib==3.10.0 pytrials
 RUN pip install PyPDF2==3.0.1 requests uv kaleido diagrams arxiv graphviz sarif-om==1.0.4
-RUN pip install rich==13.9.0 bedrock-agentcore
-RUN pip install strands-agents strands-agents-tools colorama finance-datareader
+RUN pip install rich>=14.0.0 bedrock-agentcore
+RUN pip install strands-agents==1.42.0 strands-agents-tools==0.8.0 colorama finance-datareader
 
 RUN mkdir -p /root/.streamlit
 COPY config.toml /root/.streamlit/
