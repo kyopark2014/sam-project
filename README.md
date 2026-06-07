@@ -22,36 +22,81 @@ agent = Agent(
 
 ## Strands Agent 활용 방법
 
-### Agent Architecture
+### Operation Architecture
 
 ```mermaid
-flowchart LR
-  UI["app.py<br/>Agent 모드"] --> RSA["run_strands_agent"]
-  SK["Skill · Tool · MCP"] -.-> RSA
-
-  RSA --> A["Agent<br/>stream_async"]
-  A --> BR["BedrockModel"]
-  A --> Tools
-
-  subgraph Tools["도구"]
-    direction TB
-    B["Built-in"]
-    S["strands_tools"]
-    M["MCP"]
+flowchart TB
+  subgraph UI["Streamlit (app.py)"]
+    M2[RAG]
+    M3[Agent]
+    SKUI[Skill / Strands Tool / MCP 선택]
   end
 
-  skill["skills/*/SKILL.md"] --> A
-  B --> S3["S3"]
+  subgraph Chat["chat.py"]
+    RAG[run_rag_with_knowledge_base]
+  end
+
+  subgraph LLM["Amazon Bedrock"]
+    BR[Bedrock Runtime]
+    BKB[Bedrock Agent Runtime<br/>Knowledge Base]
+  end
+
+  subgraph Skills["Agent Skills (skill.py)"]
+    SRC["skills/*/SKILL.md"]
+    BSP[build_skill_prompt]
+    GSI[get_skill_instructions]
+  end
+
+  subgraph StrandsStack["Strands Agents SDK (strands_agent.py)"]
+    RSA[run_strands_agent]
+    A[Agent]
+    SA[stream_async]
+    BM[BedrockModel]
+    BT["Built-in: execute_code, bash, upload_file_to_s3"]
+    ST["strands_tools: current_time, file_read, file_write"]
+    MCP[MCPClient / MCPClientManager]
+  end
+
+  subgraph MCPServers["MCP Servers (mcp_config.py)"]
+    T[tavily]
+    R[retrieve / RAG]
+    AWS[aws documentation]
+    WF[web_fetch / korea_weather / trade_info]
+  end
+
+  subgraph Storage["Artifacts / S3"]
+    ART[artifacts/]
+    S3[(S3)]
+  end
+
+  M2 --> RAG
+  M3 --> RSA
+  SKUI -->|skill_list| BSP
+
+  RAG --> BKB
+  RAG --> BR
+
+  RSA --> A
+  A --> SA
+  A --> BM
+  BM --> BR
+  A --> BT
+  A --> ST
+  A --> MCP
+  A --> GSI
+  BSP -->|system_prompt| A
+  GSI --> SRC
+  MCP --> MCPServers
+  BT --> ART
+  BT --> S3
 ```
 
-| 구성 요소 | 모듈 | 설명 |
-|-----------|------|------|
-| 진입점 | `strands_agent.run_strands_agent` | Agent 생성·실행 및 스트리밍 응답 |
-| 모델 | `BedrockModel` | Amazon Bedrock LLM 연동 |
-| Skills | `skill.py` | `SKILL.md` 기반 system prompt 구성 |
-| Built-in | `execute_code`, `bash`, `upload_file_to_s3` | 코드 실행·파일 업로드 |
-| strands_tools | `current_time`, `file_read`, `file_write` | Strands 내장 도구 |
-| MCP | `mcp_config.py` | tavily, RAG, aws documentation 등 외부 도구 |
+| 모드 | 모듈 | 설명 |
+|------|------|------|
+| 일상적인 대화 | `chat.general_conversation` | 대화 이력 + Bedrock Runtime `invoke_model_with_response_stream` 스트리밍 |
+| RAG | `chat.run_rag_with_knowledge_base` | Bedrock Knowledge Base 검색(`retrieve`) 후 Bedrock Runtime으로 답변 생성 |
+| **Agent** | `strands_agent.run_strands_agent` | Strands SDK + strands_tools + MCP + Skills |
+| 이미지 분석 | `chat.summarize_image` | ChatBedrock 멀티모달 (이미지 + 텍스트) 분석 |
 
 
 ### Streamlit에서 agent의 실행
