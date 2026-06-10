@@ -770,7 +770,6 @@ def general_conversation(query):
                     "max_tokens": parameters["max_tokens"],
                     "temperature": parameters.get("temperature", 0.1),
                     "top_k": parameters.get("top_k", 250),
-                    "top_p": parameters.get("top_p", 0.9),
                     "stop_sequences": parameters.get("stop_sequences", []),
                     "system": system_prompt,
                     "messages": messages
@@ -1004,7 +1003,6 @@ def run_rag_with_knowledge_base(query, st):
             "max_tokens": maxOutputTokens,
             "temperature": 0.1,
             "top_k": 250,
-            "top_p": 0.9,
             "stop_sequences": [STOP_SEQUENCE]
         }
     
@@ -1018,7 +1016,6 @@ def run_rag_with_knowledge_base(query, st):
                 "max_tokens": parameters["max_tokens"],
                 "temperature": parameters.get("temperature", 0.1),
                 "top_k": parameters.get("top_k", 250),
-                "top_p": parameters.get("top_p", 0.9),
                 "stop_sequences": parameters.get("stop_sequences", []),
                 "system": system_prompt,
                 "messages": [
