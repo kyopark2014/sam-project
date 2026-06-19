@@ -73,12 +73,13 @@ with st.sidebar:
         "aws documentation", 
         "trade_info", 
         "web_fetch",
+        "websearch",
         "korea_weather",
         "사용자 설정"
     ]
 
     mcp_selections = {}
-    default_mcp_selections = ["korea_weather", "web_fetch", "tavily"]
+    default_mcp_selections = ["korea_weather", "web_fetch", "websearch"]
 
     # Default: prevent strands_selections undefined when not in Agent mode
     default_strands_tool_selections = config.get("default_strands_tool_selections") or default_strands_tool_selections
