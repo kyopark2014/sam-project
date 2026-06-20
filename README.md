@@ -404,10 +404,6 @@ sudo yum install python3 python3-pip git docker -y
 pip install boto3
 ```
 
-Workshop의 경우에 아래 형태로 된 Credential을 복사하여 EC2 터미널에 입력합니다.
-
-<img width="700" alt="credential" src="https://github.com/user-attachments/assets/261a24c4-8a02-46cb-892a-02fb4eec4551" />
-
 아래와 같이 git source를 가져옵니다.
 
 ```python
